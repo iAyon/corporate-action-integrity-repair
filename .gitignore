@@ -29,6 +29,8 @@ data/raw/
 data/parquet/
 *.parquet
 *.csv
+data/output/*.json
+data/output/**/*.json
 
 # Environment variables & secrets
 .env
