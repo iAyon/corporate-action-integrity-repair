@@ -19,6 +19,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from src.etl.db import get_db_connection, PG_SCHEMA, PG_HOST
+from src.research.filing_parser import SECFilingParser
 
 LOCAL_FIXES_FILE = BASE_DIR / "data" / "output" / "proposed_fixes" / "proposed_fixes.json"
 
@@ -47,7 +48,7 @@ def load_pg_data(limit=2000):
                 p.date, p.fix_type AS type, p.target_field AS field,
                 p.current_value, p.proposed_value AS value, p.action,
                 p.confidence, p.verdict, p.explanation AS supporting_evidence,
-                p.source, p.source_url, p.status, p.reviewed_by, p.review_notes,
+                p.source, p.source_id, p.source_url, p.status, p.reviewed_by, p.review_notes,
                 c.check_type, c.previous_close, c.close_price, c.dividend,
                 c.volume, c.why_flagged
             FROM {PG_SCHEMA}.proposed_fixes p
@@ -73,6 +74,19 @@ def update_pg_fix(fix_id, status, reviewer, notes):
         SET status = %s, reviewed_by = %s, review_notes = %s 
         WHERE fix_id = %s;
     """, (status, reviewer, notes, fix_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def update_pg_evidence(fix_id, source_id, source_url, new_explanation):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(f"""
+        UPDATE {PG_SCHEMA}.proposed_fixes 
+        SET source = 'sec', source_id = %s, source_url = %s, explanation = %s 
+        WHERE fix_id = %s;
+    """, (source_id, source_url, new_explanation, fix_id))
     conn.commit()
     cur.close()
     conn.close()
@@ -167,6 +181,50 @@ with tab1:
                 clean_cik = str(cik).lstrip("0")
                 sec_url = f"https://www.sec.gov/edgar/browse/?CIK={clean_cik}"
                 st.markdown(f"🔗 [Open Official SEC EDGAR Filings for CIK {clean_cik}]({sec_url})")
+
+                # Show existing mined evidence if present
+                if selected_row.get("source_id"):
+                    st.success(
+                        f"**Verified SEC Filing:** `{selected_row.get('source_id')}`  \n"
+                        f"🔗 [View Official SEC Document]({selected_row.get('source_url')})"
+                    )
+
+                # Interactive AI / Text Mining Button
+                if st.button("🔎 Mine SEC Filing Text (Form 8-K / 6-K / 10-Q)", use_container_width=True):
+                    with st.spinner(f"Mining SEC EDGAR archives for CIK {clean_cik} around {selected_row.get('date')}..."):
+                        parser = SECFilingParser()
+                        try:
+                            val_str = str(selected_row.get("value", ""))
+                            target_val = float(val_str) if val_str and val_str not in ["None", "NULL"] else None
+                        except Exception:
+                            target_val = None
+                        
+                        evidence = parser.search_filing_evidence(
+                            cik=clean_cik,
+                            event_date=str(selected_row.get("date")),
+                            event_type=str(selected_row.get("type")),
+                            target_value=target_val
+                        )
+                        if evidence:
+                            st.success(
+                                f"**Matched Filing:** {evidence['form_type']} on {evidence['filing_date']}  \n"
+                                f"**Accession No:** `{evidence['source_id']}`  \n"
+                                f"**Mined Verbatim Excerpt:**  \n> \"{evidence['excerpt']}\""
+                            )
+                            st.markdown(f"🔗 [Open Document in EDGAR]({evidence['source_url']})")
+                            if data_source == "AWS RDS PostgreSQL (Live)":
+                                update_pg_evidence(
+                                    selected_fix_id,
+                                    evidence["source_id"],
+                                    evidence["source_url"],
+                                    f"{selected_row.get('supporting_evidence')} | SEC Mined Quote: {evidence['excerpt']}"
+                                )
+                                st.toast("✅ Mined evidence saved directly to AWS RDS!")
+                        else:
+                            st.info(
+                                f"ℹ️ No matching 8-K/6-K filing found within 45 days of {selected_row.get('date')}. "
+                                "This is typical for OTC non-reporting issuers or pure market volatility."
+                            )
 
             reviewer_name = st.text_input("Reviewer Name", "Ayon (Columbia)")
             review_notes = st.text_area("Review Notes", selected_row.get("review_notes") or "")
