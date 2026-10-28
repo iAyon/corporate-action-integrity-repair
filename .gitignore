@@ -25,6 +25,8 @@ wheels/
 
 # Data files (keep large binary/raw data out of git)
 *.zip
+*.xlsx
+*.xls
 data/raw/
 data/parquet/
 *.parquet
