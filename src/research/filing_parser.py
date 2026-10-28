@@ -47,10 +47,10 @@ class SECFilingParser:
         return None
 
     def search_filing_evidence(
-        self, cik: str, event_date: str, event_type: str, target_value: Optional[float] = None
+        self, cik: str, event_date: Optional[str] = None, event_type: str = "split", target_value: Optional[float] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        Finds the matching SEC filing around event_date (+- 45 days) and extracts evidence.
+        Finds the matching SEC filing around event_date (+- 45 days) or extracts company profile evidence.
         """
         clean_cik = str(cik).strip().lstrip("0")
         if not clean_cik:
@@ -58,14 +58,50 @@ class SECFilingParser:
 
         # Fetch submissions
         subs = self.client.get_company_submissions(clean_cik)
-        if not subs or "filings" not in subs or "recent" not in subs["filings"]:
+        if not subs:
             return None
 
-        recent = subs["filings"]["recent"]
+        recent = subs.get("filings", {}).get("recent", {})
         forms = recent.get("form", [])
         filing_dates = recent.get("filingDate", [])
         acc_nums = recent.get("accessionNumber", [])
         primary_docs = recent.get("primaryDocument", [])
+
+        # Clean event date string
+        clean_date = None
+        if event_date and str(event_date).strip().lower() not in ["none", "nat", ""]:
+            clean_date = str(event_date).strip()
+
+        # Handle COMPANY_ASSOCIATION directly using SEC registered metadata & latest filing
+        if event_type == "company_association" or clean_date is None:
+            comp_name = subs.get("name", "Registered Entity")
+            sic_desc = subs.get("sicDescription") or "SEC Reporting Company"
+            state = subs.get("stateOfIncorporation") or "US"
+            tickers = subs.get("tickers", [])
+            ticker_str = f" (Tickers: {', '.join(tickers)})" if tickers else ""
+            
+            latest_form = forms[0] if forms else "Registration"
+            latest_date = filing_dates[0] if filing_dates else "N/A"
+            latest_acc = acc_nums[0] if acc_nums else ""
+            latest_doc = primary_docs[0] if primary_docs else ""
+            acc_clean = latest_acc.replace("-", "")
+            
+            filing_url = (
+                f"https://www.sec.gov/Archives/edgar/data/{clean_cik}/{acc_clean}/{latest_doc}"
+                if latest_doc else f"https://www.sec.gov/edgar/browse/?CIK={clean_cik}"
+            )
+            return {
+                "source": "sec",
+                "source_id": latest_acc or clean_cik,
+                "source_url": filing_url,
+                "form_type": latest_form,
+                "filing_date": latest_date,
+                "excerpt": (
+                    f"Official SEC Registration: '{comp_name}'{ticker_str} | CIK: {clean_cik} | "
+                    f"Industry: {sic_desc} | State: {state}. Most recent filing: Form {latest_form} on {latest_date}."
+                ),
+                "matched_terms": ["company_registration", "active_issuer"],
+            }
 
         # Target terms based on event type
         if event_type == "split":
@@ -78,8 +114,7 @@ class SECFilingParser:
         else:
             keywords = ["merger", "acquisition", "combination", "surviving", "conversion"]
 
-        # Search filings within a 45-day window around event_date
-        # (corporate actions are often announced 1-4 weeks before execution)
+        # Search filings within proximity
         for i in range(len(forms)):
             form = forms[i]
             f_date = filing_dates[i]
@@ -88,10 +123,13 @@ class SECFilingParser:
             if form not in ["8-K", "8-K/A", "6-K", "6-K/A", "10-Q", "10-K"]:
                 continue
 
-            # Check date proximity (filing date within -45 to +15 days of event_date)
-            # Simple string comparison works well for ISO dates
-            if abs((int(f_date[:4]) - int(event_date[:4]))) > 1:
-                continue
+            # Year proximity check if clean_date is available
+            if clean_date and len(f_date) >= 4 and len(clean_date) >= 4:
+                try:
+                    if abs(int(f_date[:4]) - int(clean_date[:4])) > 1:
+                        continue
+                except ValueError:
+                    pass
 
             acc_clean = acc_nums[i].replace("-", "")
             doc_name = primary_docs[i]

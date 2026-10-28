@@ -199,10 +199,13 @@ with tab1:
                         except Exception:
                             target_val = None
                         
+                        rec_date = selected_row.get("date")
+                        clean_event_date = str(rec_date) if pd.notna(rec_date) and str(rec_date).lower() != "none" else None
+                        
                         evidence = parser.search_filing_evidence(
                             cik=clean_cik,
-                            event_date=str(selected_row.get("date")),
-                            event_type=str(selected_row.get("type")),
+                            event_date=clean_event_date,
+                            event_type=str(selected_row.get("type", "split")),
                             target_value=target_val
                         )
                         if evidence:
@@ -221,8 +224,9 @@ with tab1:
                                 )
                                 st.toast("✅ Mined evidence saved directly to AWS RDS!")
                         else:
+                            date_str = clean_event_date or "the snapshot record"
                             st.info(
-                                f"ℹ️ No matching 8-K/6-K filing found within 45 days of {selected_row.get('date')}. "
+                                f"ℹ️ No matching 8-K/6-K filing found within 45 days of {date_str}. "
                                 "This is typical for OTC non-reporting issuers or pure market volatility."
                             )
 
