@@ -6,15 +6,20 @@ Supports dual-mode:
 """
 
 import os
+import sys
 import json
 from pathlib import Path
 import streamlit as st
 import pandas as pd
 from psycopg2.extras import RealDictCursor
 
+# Ensure project root is in sys.path so 'src' imports work from any execution context
+BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
 from src.etl.db import get_db_connection, PG_SCHEMA, PG_HOST
 
-BASE_DIR = Path(__file__).resolve().parent.parent
 LOCAL_FIXES_FILE = BASE_DIR / "data" / "output" / "proposed_fixes" / "proposed_fixes.json"
 
 st.set_page_config(
