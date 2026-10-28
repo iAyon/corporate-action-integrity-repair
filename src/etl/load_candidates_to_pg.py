@@ -72,6 +72,7 @@ def create_tables(conn):
             verdict VARCHAR(64),
             explanation TEXT,
             source VARCHAR(64),
+            source_id VARCHAR(64),
             source_url TEXT,
             status VARCHAR(32) DEFAULT 'pending_review',
             reviewed_by VARCHAR(64),
