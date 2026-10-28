@@ -29,6 +29,7 @@ wheels/
 *.xls
 data/raw/
 data/parquet/
+data/sec_cache/
 *.parquet
 *.csv
 data/output/*.json
