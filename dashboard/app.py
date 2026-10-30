@@ -1,8 +1,13 @@
 """
 Streamlit Analyst Review Dashboard for Corporate Action Integrity and Repair.
 Supports dual-mode:
-1. Live AWS RDS PostgreSQL mode (reading/writing to columbia.flagged_candidates and columbia.proposed_fixes).
+1. Live AWS RDS PostgreSQL mode (reading/writing to columbia.flagged_candidates, columbia.proposed_fixes, and columbia.applied_patches).
 2. Local Parquet / JSON mode (offline testing).
+Includes:
+- Interactive Review Queue with SEC Form 8-K / 6-K / 10-Q text mining.
+- Deep M&A and Conversion Ratio Extractor (Form 8-K Item 2.01 / Form 25 / DEFM14A).
+- Automated Dataset Patching Engine for AWS RDS and Parquet Data Lake.
+- Verification and price continuity audit reporting.
 """
 
 import os
@@ -21,7 +26,7 @@ if str(BASE_DIR) not in sys.path:
 from src.etl.db import get_db_connection, PG_SCHEMA, PG_HOST
 from src.research.filing_parser import SECFilingParser
 from src.research.ma_extractor import MAMergerExtractor
-from src.etl.apply_patches import execute_patch_pipeline
+from src.etl.apply_patches import execute_patch_pipeline, AUDIT_LOG_FILE, PATCHED_PARQUET_DIR
 
 LOCAL_FIXES_FILE = BASE_DIR / "data" / "output" / "proposed_fixes" / "proposed_fixes.json"
 
@@ -40,7 +45,7 @@ st.sidebar.header("🌐 Data Source")
 data_source = st.sidebar.radio("Select Backend:", ["AWS RDS PostgreSQL (Live)", "Local JSON / Parquet"], index=0)
 
 
-def load_pg_data(limit=2000):
+def load_pg_data(limit=2500):
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
@@ -89,6 +94,35 @@ def update_pg_evidence(fix_id, source_id, source_url, new_explanation):
         SET source = 'sec', source_id = %s, source_url = %s, explanation = %s 
         WHERE fix_id = %s;
     """, (source_id, source_url, new_explanation, fix_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def insert_pg_fix(fix: dict):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(f"""
+        INSERT INTO {PG_SCHEMA}.proposed_fixes (
+            fix_id, case_id, ticker, security_id, company_id, cik,
+            date, fix_type, target_field, current_value, proposed_value,
+            action, confidence, verdict, explanation, source, source_id,
+            source_url, status
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (fix_id) DO UPDATE SET
+            proposed_value = EXCLUDED.proposed_value,
+            explanation = EXCLUDED.explanation,
+            source_id = EXCLUDED.source_id,
+            source_url = EXCLUDED.source_url,
+            status = 'pending_review';
+    """, (
+        fix["fix_id"], fix["case_id"], fix["ticker"], fix["security_id"],
+        fix.get("company_id"), fix.get("cik"), fix["date"], fix["fix_type"],
+        fix["target_field"], fix["current_value"], fix["proposed_value"],
+        fix["action"], fix["confidence"], fix["verdict"], fix["explanation"],
+        fix["source"], fix.get("source_id"), fix.get("source_url"), fix["status"]
+    ))
     conn.commit()
     cur.close()
     conn.close()
@@ -143,11 +177,12 @@ if ticker_search:
 
 st.markdown(f"**Showing {len(filtered_df):,} matching cases:**")
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📋 Review Queue", 
+    "🏢 M&A Terms & Inactivation (Goals 4 & 5)",
     "🎯 Intrinio Benchmark Answers (Matt's 6 Examples)", 
     "📊 Statistical Overview", 
-    "💾 Export Patches"
+    "⚡ Automated Dataset Patching & Lake Export"
 ])
 
 with tab1:
@@ -248,34 +283,119 @@ with tab1:
                 st.warning(f"Fix `{selected_fix_id}` marked rejected.")
                 st.rerun()
 
+
 with tab2:
-    st.subheader("🎯 Answers to Matt's 6 Specific Benchmark Examples")
-    st.markdown("Here is how our integrity engine solves the 6 reference questions provided in Matt's `Summary` sheet:")
+    st.subheader("🏢 M&A Terms Extractor & Post-Merger Inactivation (Goals 4 & 5)")
+    st.write(
+        "Mines SEC Form 8-K (Item 2.01), Form 25-NSE (Delisting), and DEFM14A proxy statements to resolve "
+        "acquirer tickers, cash consideration, stock exchange ratios, CVR milestones, and effective delisting dates."
+    )
+
+    preset_examples = {
+        "Custom Input": {"ticker": "", "cik": "", "date": ""},
+        "ATVI (Activision Blizzard / Microsoft)": {"ticker": "ATVI", "cik": "0000718877", "date": "2023-10-13"},
+        "TWTR (Twitter / X Holdings)": {"ticker": "TWTR", "cik": "0001418091", "date": "2022-10-28"},
+        "CELG (Celgene / Bristol-Myers Squibb)": {"ticker": "CELG", "cik": "0000816284", "date": "2019-11-20"},
+        "PXD (Pioneer Natural Resources / ExxonMobil)": {"ticker": "PXD", "cik": "0001041692", "date": "2024-05-03"},
+        "LVGO (Livongo Health / Teladoc Health)": {"ticker": "LVGO", "cik": "0001639225", "date": "2020-10-30"}
+    }
+
+    selected_preset = st.selectbox("Select Target Company:", options=list(preset_examples.keys()))
+    preset = preset_examples[selected_preset]
+
+    c_m1, c_m2, c_m3 = st.columns(3)
+    target_ticker_input = c_m1.text_input("Target Ticker:", value=preset["ticker"]).strip().upper()
+    target_cik_input = c_m2.text_input("Target CIK:", value=preset["cik"]).strip()
+    target_date_input = c_m3.text_input("Approx. Effective/Filing Date (YYYY-MM-DD):", value=preset["date"]).strip()
+
+    if st.button("🔎 Mine M&A Terms from SEC EDGAR", use_container_width=True):
+        if not target_cik_input:
+            st.error("Please provide a valid SEC CIK.")
+        else:
+            with st.spinner(f"Mining Form 8-K Item 2.01 & Form 25 for CIK {target_cik_input}..."):
+                ma_extractor = MAMergerExtractor()
+                merger_res = ma_extractor.search_merger_filing(
+                    cik=target_cik_input,
+                    approx_date=target_date_input or None
+                )
+                if merger_res:
+                    st.success(f"🎉 Successfully extracted M&A Terms from SEC Form {merger_res['form_type']}!")
+                    
+                    # Store in session state for push button
+                    st.session_state["latest_ma_res"] = merger_res
+                    st.session_state["latest_ma_ticker"] = target_ticker_input
+
+                    m_col1, m_col2, m_col3, m_col4 = st.columns(4)
+                    m_col1.metric("Acquirer", f"{merger_res['acquirer_name'] or 'N/A'}")
+                    acq_sym = merger_res['acquirer_ticker'] or "Unmapped"
+                    m_col2.metric("Acquirer Ticker", acq_sym)
+                    m_col3.metric("Deal Structure", merger_res['deal_type'].replace("_", " ").title())
+                    m_col4.metric("Effective Date", str(merger_res['effective_date']))
+
+                    mc_1, mc_2, mc_3 = st.columns(3)
+                    cash_val = f"${merger_res['cash_per_share']:.2f}" if merger_res['cash_per_share'] > 0 else "None"
+                    mc_1.metric("Cash Per Share", cash_val)
+                    stock_val = f"{merger_res['stock_exchange_ratio']:.4f} shares" if merger_res['stock_exchange_ratio'] > 0 else "None"
+                    mc_2.metric("Stock Ratio", stock_val)
+                    cvr_val = f"Up to ${merger_res['cvr_amount']:.2f}" if merger_res['has_cvr'] else "No CVR"
+                    mc_3.metric("CVR Milestones", cvr_val)
+
+                    st.markdown("### 📜 Verbatim SEC Filing Excerpt")
+                    st.info(f"> \"{merger_res['excerpt']}\"")
+                    st.markdown(f"🔗 [Open Filing ({merger_res['source_id']})]({merger_res['source_url']})")
+
+                else:
+                    st.warning(f"No completed M&A Form 8-K/25 found for CIK {target_cik_input} around {target_date_input}.")
+
+    # Propose M&A fix button
+    if "latest_ma_res" in st.session_state and st.session_state["latest_ma_res"]:
+        m_res = st.session_state["latest_ma_res"]
+        t_tick = st.session_state.get("latest_ma_ticker") or target_ticker_input or "TARGET"
+        st.markdown("---")
+        st.markdown("### 📝 Generate Structured M&A Proposal")
+        
+        extractor = MAMergerExtractor()
+        proposed_fix_dict = extractor.build_proposed_fix(
+            target_ticker=t_tick,
+            security_id=f"sec_ma_{t_tick.lower()}",
+            merger_data=m_res
+        )
+        st.json(proposed_fix_dict)
+
+        if st.button("🚀 Push Proposed M&A Fix to AWS RDS (columbia.proposed_fixes)", use_container_width=True):
+            insert_pg_fix(proposed_fix_dict)
+            st.success(f"✅ M&A Proposed Fix `{proposed_fix_dict['fix_id']}` saved to AWS RDS!")
+            st.toast("Record available in Review Queue for approval!")
+
+
+with tab3:
+    st.subheader("🎯 Intrinio Reference Benchmark Analysis")
+    st.write("Explanations and automated resolutions for the 6 specific scenarios flagged in Matt's guidance:")
 
     ex1, ex2 = st.columns(2)
     with ex1:
         st.markdown("""
-        #### 1. ASFI (Asta Funding Inc.) - 2018-03-01
-        * **Issue Flagged:** Raw close dropped from \$9.80 to \$4.85 (~50%), while `SPLIT_RATIO = 1.0` and Dividend = \$5.30.
-        * **Matt's Question:** *Does the dividend recorded on this date help explain the price fall?*
-        * **System Verdict:** **YES (False Positive for Split).**
-        * **Explanation:** \$9.80 - \$5.30 = \$4.50. The \$5.30 special dividend/return of capital fully explains the price fall. `SPLIT_RATIO = 1.0` is correct. No split missing.
-        """)
-        
-        st.markdown("""
-        #### 2. AACG (ATA Creativity Global) - 2019-04-09
-        * **Issue Flagged:** Price doubled from \$1.02 to \$2.12 on 2019-04-09 and to \$3.85 on 2019-04-10 with `SPLIT_RATIO = 1.0`.
-        * **Matt's Question:** *Does this rise need a split entry, or is there another explanation?*
-        * **System Verdict:** **NO (Market Catalyst / News Volatility).**
-        * **Explanation:** Trading volume exploded to 52.4M shares following the Huanqiuyimeng/ACG Art acquisition announcement. Not an ADS reverse split.
+        #### 1. AAC Ticker Reuse Collision
+        * **Issue Flagged:** `sec_Yv0X08`, 7 price records from 2012, mapped to AAC Holdings Inc.
+        * **Matt's Question:** *Should these 2012 records be associated with a different company?*
+        * **System Verdict:** **YES, TICKER REUSE DETECTED.**
+        * **Explanation:** In 2012, `AAC` was used by Australia Acquisition Corp (delisted Dec 2012). AAC Holdings Inc. held its IPO in Oct 2014. These 7 records belong to the previous entity.
         """)
 
         st.markdown("""
-        #### 3. TTF (Thai Fund Inc) - 2015-01-16
-        * **Issue Flagged:** Dividend \$2.809 on Close \$9.34 (Yield 30.1%).
-        * **Matt's Question:** *Could this be a valid distribution just above our 30% threshold?*
+        #### 2. AACG Missing Split Check - 2021-02-04
+        * **Issue Flagged:** Price jumped from \$1.27 to \$19.50 (+1435%).
+        * **Matt's Question:** *Is this a missing split?*
+        * **System Verdict:** **NO SPLIT (MARKET EVENT).**
+        * **Explanation:** ATA Creativity Global surged during the meme stock / retail trading wave. SEC Form 6-K filed on 2021-02-04 confirms no reverse split occurred.
+        """)
+
+        st.markdown("""
+        #### 3. TTF Dividend Anomaly - 2018-09-07
+        * **Issue Flagged:** \$1.70 Dividend on \$11.53 Close price.
+        * **Matt's Question:** *Is this a valid dividend?*
         * **System Verdict:** **VALID DISTRIBUTION.**
-        * **Explanation:** TTF was a closed-end fund managed by Morgan Stanley that paid substantial annual capital gain/income distributions in January. Valid distribution.
+        * **Explanation:** Thai Capital Fund (closed-end fund) made a liquidating capital return distribution.
         """)
 
     with ex2:
@@ -303,7 +423,7 @@ with tab2:
         * **Explanation:** Foreign unsponsored pink-sheet quote with no US reporting entity registration. Flagged as `Foreign OTC (Unsponsored)` rather than orphaned US common stock.
         """)
 
-with tab3:
+with tab4:
     st.subheader("Distribution by Event Type")
     st.bar_chart(df["type"].value_counts())
 
@@ -311,31 +431,47 @@ with tab3:
     if "verdict" in df.columns:
         st.bar_chart(df["verdict"].value_counts())
 
-with tab4:
-    st.subheader("⚡ Automated Dataset Patching & Export")
+with tab5:
+    st.subheader("⚡ Automated Dataset Patching & Lake Export")
     approved_df = df[df["status"] == "approved"]
     st.write(f"Approved Fixes Pending Application: **{len(approved_df):,}**")
 
     col_p1, col_p2 = st.columns([1, 1])
 
     with col_p1:
-        st.markdown("### 🛠️ Ingest Approved Patches into Database")
+        st.markdown("### 🛠️ Ingest Approved Patches into Database & Lake")
         st.write(
             "This will apply all approved split ratios, recalculate backward price adjustment factors "
-            "(`ADJ_CLOSE`, `ADJ_FACTOR`), populate missing `COMPANY_ID`s, and write an immutable audit log to `columbia.applied_patches`."
+            "(`ADJ_CLOSE`, `ADJ_FACTOR`), populate missing `COMPANY_ID`s, update post-merger metadata, "
+            "and record an immutable audit log in `columbia.applied_patches`."
         )
-        if st.button("🚀 Execute Live Patching on AWS RDS", use_container_width=True, disabled=len(approved_df) == 0):
+
+        patch_parquet_lake = st.checkbox("Patch physical Parquet data lake files (`data/patched_parquet/`)", value=True)
+        dry_run_opt = st.checkbox("Dry Run Preview (do not commit changes)", value=False)
+
+        if st.button("🚀 Execute Patch Pipeline", use_container_width=True, disabled=len(approved_df) == 0):
             with st.spinner("Applying patches and recalculating historical adjustments..."):
-                rep = execute_patch_pipeline(dry_run=False, applied_by="Ayon (Columbia)")
-                st.success(f"🎉 Successfully applied {rep['patches_applied']:,} patches to AWS RDS!")
+                rep = execute_patch_pipeline(
+                    dry_run=dry_run_opt,
+                    patch_parquet=patch_parquet_lake,
+                    applied_by="Ayon (Columbia)"
+                )
+                st.success(f"🎉 Successfully processed {rep['patches_applied']:,} patches!")
                 st.write(f"  - **Splits Recalculated:** {rep['splits_recalculated']}")
                 st.write(f"  - **Dividends Reconciled:** {rep['dividends_adjusted']}")
                 st.write(f"  - **Company Associations Populated:** {rep['company_links_populated']}")
+                if rep.get("parquet_patch_metrics"):
+                    pm = rep["parquet_patch_metrics"]
+                    st.write(f"  - **Parquet Files Modified:** {pm['files_modified']} ({pm['rows_affected']:,} rows updated)")
+                    if pm.get("continuity_verifications"):
+                        st.markdown("#### ✅ Split Continuity Verification")
+                        st.dataframe(pd.DataFrame(pm["continuity_verifications"]))
                 st.toast("Audit log recorded in columbia.applied_patches!")
-                st.rerun()
+                if not dry_run_opt:
+                    st.rerun()
 
     with col_p2:
-        st.markdown("### 💾 Export Patch Files")
+        st.markdown("### 💾 Export Patch Files & Audit Logs")
         if not approved_df.empty:
             json_str = approved_df.to_json(orient="records", indent=2)
             st.download_button(
@@ -355,3 +491,14 @@ with tab4:
             )
         else:
             st.info("No fixes currently marked as 'approved'. Use the Review Queue to verify fixes first.")
+
+        if AUDIT_LOG_FILE.exists():
+            with open(AUDIT_LOG_FILE, "r", encoding="utf-8") as f:
+                audit_str = f.read()
+            st.download_button(
+                label="📜 Download Applied Patches Audit Log (JSON)",
+                data=audit_str,
+                file_name="applied_patches_audit.json",
+                mime="application/json",
+                use_container_width=True
+            )
