@@ -20,6 +20,8 @@ if str(BASE_DIR) not in sys.path:
 
 from src.etl.db import get_db_connection, PG_SCHEMA, PG_HOST
 from src.research.filing_parser import SECFilingParser
+from src.research.ma_extractor import MAMergerExtractor
+from src.etl.apply_patches import execute_patch_pipeline
 
 LOCAL_FIXES_FILE = BASE_DIR / "data" / "output" / "proposed_fixes" / "proposed_fixes.json"
 
@@ -310,22 +312,46 @@ with tab3:
         st.bar_chart(df["verdict"].value_counts())
 
 with tab4:
-    st.subheader("Export Verified Fixes")
+    st.subheader("⚡ Automated Dataset Patching & Export")
     approved_df = df[df["status"] == "approved"]
-    st.write(f"Approved Fixes in Queue: **{len(approved_df):,}**")
+    st.write(f"Approved Fixes Pending Application: **{len(approved_df):,}**")
 
-    if not approved_df.empty:
-        json_str = approved_df.to_json(orient="records", indent=2)
-        st.download_button(
-            label="📥 Download Approved Fixes (JSON)",
-            data=json_str,
-            file_name="approved_fixes.json",
-            mime="application/json"
+    col_p1, col_p2 = st.columns([1, 1])
+
+    with col_p1:
+        st.markdown("### 🛠️ Ingest Approved Patches into Database")
+        st.write(
+            "This will apply all approved split ratios, recalculate backward price adjustment factors "
+            "(`ADJ_CLOSE`, `ADJ_FACTOR`), populate missing `COMPANY_ID`s, and write an immutable audit log to `columbia.applied_patches`."
         )
-        csv_str = approved_df.to_csv(index=False)
-        st.download_button(
-            label="📥 Download Approved Fixes (CSV)",
-            data=csv_str,
-            file_name="approved_fixes.csv",
-            mime="text/csv"
-        )
+        if st.button("🚀 Execute Live Patching on AWS RDS", use_container_width=True, disabled=len(approved_df) == 0):
+            with st.spinner("Applying patches and recalculating historical adjustments..."):
+                rep = execute_patch_pipeline(dry_run=False, applied_by="Ayon (Columbia)")
+                st.success(f"🎉 Successfully applied {rep['patches_applied']:,} patches to AWS RDS!")
+                st.write(f"  - **Splits Recalculated:** {rep['splits_recalculated']}")
+                st.write(f"  - **Dividends Reconciled:** {rep['dividends_adjusted']}")
+                st.write(f"  - **Company Associations Populated:** {rep['company_links_populated']}")
+                st.toast("Audit log recorded in columbia.applied_patches!")
+                st.rerun()
+
+    with col_p2:
+        st.markdown("### 💾 Export Patch Files")
+        if not approved_df.empty:
+            json_str = approved_df.to_json(orient="records", indent=2)
+            st.download_button(
+                label="📥 Download Approved Fixes (JSON)",
+                data=json_str,
+                file_name="approved_fixes.json",
+                mime="application/json",
+                use_container_width=True
+            )
+            csv_str = approved_df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Approved Fixes (CSV)",
+                data=csv_str,
+                file_name="approved_fixes.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        else:
+            st.info("No fixes currently marked as 'approved'. Use the Review Queue to verify fixes first.")
