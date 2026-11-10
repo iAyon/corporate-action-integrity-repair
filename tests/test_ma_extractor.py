@@ -1,5 +1,6 @@
 """
 Unit tests for refined MAMergerExtractor (Project Goals 4 & 5).
+Version 1.2 (November 2026 Build) - Columbia Capstone / Intrinio.
 """
 
 import json

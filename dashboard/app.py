@@ -1,5 +1,7 @@
 """
 Streamlit Analyst Review Dashboard for Corporate Action Integrity and Repair.
+Version 1.2 (November 2026 Release) - Columbia Capstone in Partnership with Intrinio.
+
 Supports dual-mode:
 1. Live AWS RDS PostgreSQL mode (reading/writing to columbia.flagged_candidates, columbia.proposed_fixes, and columbia.applied_patches).
 2. Local Parquet / JSON mode (offline testing).
@@ -37,7 +39,7 @@ st.set_page_config(
 )
 
 st.title("⚖️ Corporate Action Integrity & Repair System")
-st.markdown("Automated data cleanup and ongoing monitoring for US equities and OTC corporate actions.")
+st.markdown("🚀 **Version 1.2 (November 2026 Build)** | Automated data cleanup and ongoing monitoring for US equities and OTC corporate actions.")
 
 
 # Data Source Selection

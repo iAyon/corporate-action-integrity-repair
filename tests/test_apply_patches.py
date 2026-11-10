@@ -1,5 +1,6 @@
 """
 Unit tests for automated dataset patch application, backward price adjustments, and price continuity.
+Version 1.2 (November 2026 Build) - Columbia Capstone / Intrinio.
 """
 
 import unittest

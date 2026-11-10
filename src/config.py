@@ -1,10 +1,14 @@
 """
 Configuration module for the Corporate Action Integrity and Repair System.
+Version 1.2.0 (November 2026 Release) - Columbia Capstone / Intrinio.
 Defines project paths, external API constants, and detection parameters.
 """
 
 from pathlib import Path
 import os
+
+__version__ = "1.2.0"
+BUILD_DATE = "2026-11-10"
 
 # Root Directory
 BASE_DIR = Path(__file__).resolve().parent.parent
