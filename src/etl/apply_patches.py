@@ -1,14 +1,15 @@
 """
-Automated Dataset Patching Engine (Project Goals 1, 2, 3, 4, 5).
-Executes approved corporate action fixes against the dataset:
-1. Applies split ratio corrections and recalculates backward price adjustment factors (ADJ_FACTOR, ADJ_CLOSE, ADJ_OPEN, ADJ_HIGH, ADJ_LOW).
-2. Applies dividend payout corrections (EX_DIVIDEND).
-3. Populates missing company associations (COMPANY_ID, CIK).
-4. Delisting & conversion flags for post-M&A securities.
-5. Verifies price continuity across split boundaries to ensure artificial price cliffs are eliminated.
-6. Patches physical Parquet files in the data lake (data/parquet/ -> data/patched_parquet/).
-7. Records an immutable audit log in columbia.applied_patches on AWS RDS.
-8. Updates proposed fix statuses from 'approved' to 'auto_applied'.
+Automated Dataset Patching Engine (V2 - Calibrated).
+Executes approved corporate action fixes against the dataset with strict audit transparency:
+1. Genuine Dataset Mutations (action IN ('create', 'update') AND current_value != proposed_value):
+   - Applies split ratio corrections and recalculates backward price adjustment factors (ADJ_FACTOR, ADJ_CLOSE, ADJ_OPEN, ADJ_HIGH, ADJ_LOW).
+   - Applies dividend corrections and missing CIK links.
+   - Recalculates physical Parquet lake files (data/parquet/ -> data/patched_parquet/).
+   - Verifies mathematical price continuity across split boundaries.
+   - Logs to columbia.applied_patches on AWS RDS.
+2. Verified Validations (action == 'no_action' OR current_value == proposed_value):
+   - Audited and confirmed accurate without data modification (e.g. ASFI special dividend, TTF distribution).
+   - Reported transparently as 'verified_no_change' rather than inflating patch counts.
 """
 
 import os
@@ -54,7 +55,10 @@ def init_patch_tables(conn):
 
 
 def get_approved_fixes(conn) -> List[Dict[str, Any]]:
-    """Retrieves all fixes marked as 'approved' awaiting dataset ingestion."""
+    """
+    Retrieves all fixes marked as 'approved' awaiting dataset ingestion.
+    Only returns genuine data mutations (action IN ('create', 'update') AND current_value != proposed_value).
+    """
     cur = conn.cursor(cursor_factory=RealDictCursor)
     cur.execute(f"""
         SELECT 
@@ -64,11 +68,25 @@ def get_approved_fixes(conn) -> List[Dict[str, Any]]:
             status, reviewed_by, review_notes
         FROM {PG_SCHEMA}.proposed_fixes 
         WHERE status = 'approved'
+          AND action IN ('create', 'update')
+          AND current_value IS DISTINCT FROM proposed_value
         ORDER BY date ASC;
     """)
     rows = cur.fetchall()
     cur.close()
     return [dict(r) for r in rows]
+
+
+def get_verified_no_change_count(conn) -> int:
+    """Counts candidate records verified as accurate with no data modification required."""
+    cur = conn.cursor()
+    cur.execute(f"""
+        SELECT COUNT(*) FROM {PG_SCHEMA}.proposed_fixes
+        WHERE status = 'verified_no_change' OR action = 'no_action';
+    """)
+    cnt = cur.fetchone()[0]
+    cur.close()
+    return cnt
 
 
 def apply_split_patch_to_dataframe(
@@ -81,7 +99,6 @@ def apply_split_patch_to_dataframe(
     Applies a split ratio fix to a Polars DataFrame for a security and
     recalculates historical adjustment factors backwards in time.
     """
-    # 1. Update SPLIT_RATIO for target date
     df = df.with_columns([
         pl.when((pl.col("SECURITY_ID") == security_id) & (pl.col("DATE") == split_date))
         .then(pl.lit(new_split_ratio))
@@ -89,8 +106,6 @@ def apply_split_patch_to_dataframe(
         .alias("SPLIT_RATIO")
     ])
 
-    # 2. Recalculate ADJ_FACTOR & ADJ_CLOSE for that security
-    # Backward cumulative split factor: dates strictly before split_date get divided by split_ratio
     sec_df = df.filter(pl.col("SECURITY_ID") == security_id).sort("DATE")
     if len(sec_df) > 0:
         df = df.with_columns([
@@ -139,16 +154,9 @@ def apply_dividend_patch_to_dataframe(
 def apply_company_association_patch(
     df: pl.DataFrame,
     security_id: str,
-    new_company_id: str,
     new_cik: Optional[str] = None
 ) -> pl.DataFrame:
-    """Populates missing or incorrect COMPANY_ID and CIK across all rows of a security."""
-    df = df.with_columns([
-        pl.when(pl.col("SECURITY_ID") == security_id)
-        .then(pl.lit(new_company_id))
-        .otherwise(pl.col("COMPANY_ID"))
-        .alias("COMPANY_ID")
-    ])
+    """Populates validated CIK across all rows of a security."""
     if new_cik and "CIK" in df.columns:
         df = df.with_columns([
             pl.when(pl.col("SECURITY_ID") == security_id)
@@ -182,7 +190,6 @@ def verify_split_continuity(
 
     if prev_adj and prev_adj > 0 and curr_adj and curr_adj > 0:
         pct_diff = abs(curr_adj - prev_adj) / prev_adj
-        # Split is verified continuous if adjusted jump is under 25% (typical daily volatility bound)
         is_continuous = pct_diff < 0.25
         return {
             "verified": is_continuous,
@@ -228,14 +235,10 @@ class ParquetPatchEngine:
         output_dir: Path = PATCHED_PARQUET_DIR,
         in_place: bool = False
     ) -> Dict[str, Any]:
-        """
-        Applies a list of approved fixes across all affected Parquet lake files.
-        Writes patched files to output_dir (or in-place with .bak backups).
-        """
+        """Applies approved mutations across affected Parquet lake files."""
         output_dir.mkdir(parents=True, exist_ok=True)
         sec_map = self.build_security_index()
 
-        # Group fixes by target parquet file
         file_to_fixes: Dict[Path, List[Dict[str, Any]]] = {}
         unmatched_fixes = []
 
@@ -259,12 +262,10 @@ class ParquetPatchEngine:
             "continuity_verifications": []
         }
 
-        print(f"[ParquetPatchEngine] Found {len(file_to_fixes)} file(s) containing {metrics['matched_fixes']} approved fix(es).")
+        print(f"[ParquetPatchEngine] Found {len(file_to_fixes)} file(s) containing {metrics['matched_fixes']} approved mutations.")
 
         for fpath, file_fixes in file_to_fixes.items():
-            print(f"  - Processing {fpath.name} ({len(file_fixes)} fix(es))...")
             df = pl.read_parquet(fpath)
-            orig_len = len(df)
 
             for fix in file_fixes:
                 sid = fix["security_id"]
@@ -298,14 +299,12 @@ class ParquetPatchEngine:
                         pass
 
                 elif ftype == "company_association":
-                    comp_id = new_val
-                    cik = fix.get("cik")
-                    df = apply_company_association_patch(df, sid, comp_id, cik)
+                    cik = fix.get("cik") or new_val
+                    df = apply_company_association_patch(df, sid, new_cik=cik)
                     metrics["companies_linked"] += 1
 
                 metrics["rows_affected"] += len(df.filter(pl.col("SECURITY_ID") == sid))
 
-            # Write patched file
             out_file = output_dir / fpath.name
             if in_place:
                 bak_file = fpath.with_suffix(".parquet.bak")
@@ -327,18 +326,19 @@ def execute_patch_pipeline(
     applied_by: str = "AutomatedPatchEngine"
 ) -> Dict[str, Any]:
     """
-    Orchestrates the application of all approved fixes:
-    1. Updates AWS RDS PostgreSQL audit tables (applied_patches, proposed_fixes).
-    2. Optionally applies patches to physical Parquet lake files.
-    3. Saves verification and continuity audit logs.
+    Executes the patch pipeline:
+    - Only mutates records where current_value != proposed_value.
+    - Reports verified no-change validations transparently.
     """
     conn = get_db_connection()
     try:
         init_patch_tables(conn)
         approved_fixes = get_approved_fixes(conn)
-        
+        verified_no_change_count = get_verified_no_change_count(conn)
+
         report = {
-            "total_approved_found": len(approved_fixes),
+            "total_approved_mutations": len(approved_fixes),
+            "verified_validations_count": verified_no_change_count,
             "patches_applied": 0,
             "splits_recalculated": 0,
             "dividends_adjusted": 0,
@@ -349,10 +349,10 @@ def execute_patch_pipeline(
         }
 
         if not approved_fixes:
-            print("[INFO] No approved fixes pending in columbia.proposed_fixes.")
+            print(f"[INFO] No genuine mutations pending. (Audited {verified_no_change_count:,} verified no-change validations).")
             return report
 
-        print(f"[START] Processing {len(approved_fixes):,} approved fix(es) (Dry-Run: {dry_run}, Patch Parquet: {patch_parquet})...")
+        print(f"[START] Processing {len(approved_fixes):,} approved mutation(s) (Dry-Run: {dry_run}, Patch Parquet: {patch_parquet})...")
         t0 = time.time()
         applied_records = []
         fix_ids_to_update = []
@@ -377,8 +377,7 @@ def execute_patch_pipeline(
                     recalc_summary = {
                         "action": "recalculated_backward_adjustment_factors",
                         "split_multiplier": split_float,
-                        "backward_close_adjustment": f"Historical close / {split_float}",
-                        "continuity_status": "verified_cliff_eliminated" if split_float != 1.0 else "no_split_needed"
+                        "backward_close_adjustment": f"Historical close / {split_float}"
                     }
                 except ValueError:
                     recalc_summary = {"action": "split_value_logged"}
@@ -393,15 +392,8 @@ def execute_patch_pipeline(
             elif fix_type == "company_association":
                 report["company_links_populated"] += 1
                 recalc_summary = {
-                    "action": "parent_company_id_linked",
-                    "assigned_company_id": new_val,
-                    "resolved_cik": fix.get("cik")
-                }
-
-            elif fix_type == "merger_acquisition":
-                recalc_summary = {
-                    "action": "merger_conversion_terms_applied",
-                    "terms": new_val
+                    "action": "cik_linked",
+                    "resolved_cik": fix.get("cik") or new_val
                 }
 
             patch_id = f"patch_{fix_id.replace('fix_', '')}"
@@ -413,7 +405,6 @@ def execute_patch_pipeline(
             fix_ids_to_update.append(fix_id)
             report["patches_applied"] += 1
 
-        # Physical Parquet lake patching if requested
         if patch_parquet and not dry_run:
             engine = ParquetPatchEngine()
             lake_metrics = engine.apply_fixes_to_lake(
@@ -425,7 +416,6 @@ def execute_patch_pipeline(
 
         if not dry_run and applied_records:
             cur = conn.cursor()
-            # 1. Insert into applied_patches audit table
             insert_sql = f"""
                 INSERT INTO {PG_SCHEMA}.applied_patches (
                     patch_id, fix_id, ticker, security_id, event_date,
@@ -440,7 +430,6 @@ def execute_patch_pipeline(
             """
             execute_values(cur, insert_sql, applied_records, page_size=1000)
 
-            # 2. Update proposed_fixes status to 'auto_applied'
             cur.execute(f"""
                 UPDATE {PG_SCHEMA}.proposed_fixes 
                 SET status = 'auto_applied'
@@ -450,19 +439,13 @@ def execute_patch_pipeline(
             conn.commit()
             cur.close()
 
-            # Save local backup audit file
             DATA_DIR.joinpath("output").mkdir(parents=True, exist_ok=True)
             with open(AUDIT_LOG_FILE, "w", encoding="utf-8") as f:
                 json.dump(report, f, indent=2, default=str)
 
         elapsed = time.time() - t0
-        print(f"[OK] Successfully processed {report['patches_applied']} patches in {elapsed:.2f}s!")
-        print(f"  - Splits Recalculated: {report['splits_recalculated']}")
-        print(f"  - Dividends Adjusted: {report['dividends_adjusted']}")
-        print(f"  - Company Links Populated: {report['company_links_populated']}")
-        if report.get("parquet_patch_metrics"):
-            m = report["parquet_patch_metrics"]
-            print(f"  - Parquet Files Modified: {m['files_modified']} ({m['rows_affected']:,} rows affected)")
+        print(f"[OK] Successfully applied {report['patches_applied']} mutations in {elapsed:.2f}s!")
+        print(f"  - Verified No-Change Validations: {verified_no_change_count:,}")
         return report
 
     finally:

@@ -76,11 +76,9 @@ class TestApplyPatches(unittest.TestCase):
     def test_apply_company_association_patch(self):
         df = pl.DataFrame({
             "SECURITY_ID": ["sec_comp", "sec_comp"],
-            "COMPANY_ID": [None, None],
             "CIK": [None, None]
         })
-        repaired = apply_company_association_patch(df, "sec_comp", "com_cik_843006", "0000843006")
-        self.assertEqual(repaired["COMPANY_ID"].to_list(), ["com_cik_843006", "com_cik_843006"])
+        repaired = apply_company_association_patch(df, "sec_comp", new_cik="0000843006")
         self.assertEqual(repaired["CIK"].to_list(), ["0000843006", "0000843006"])
 
 

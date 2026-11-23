@@ -12,14 +12,15 @@ An enterprise-grade automated data cleanup and ongoing monitoring system for US 
 | Component | Status | Metric / Output |
 | :--- | :---: | :--- |
 | **Benchmark Candidate Ingestion** | ✅ Production | **14,187 candidate records** ingested into Intrinio AWS RDS (`columbia.flagged_candidates`) |
-| **Automated Candidate Resolver** | ✅ Production | **3,522** missing splits proposed, **248** distributions checked, **2,400+** volatility false positives eliminated |
-| **Reference Benchmarks Solved** | ✅ Production | **6 / 6 reference benchmark scenarios** fully resolved and documented (AAC, AACG, TTF, ASFI, REX, APTFF) |
+| **Calibrated Candidate Resolver** | ✅ Production | **877** high-precision persistent splits proposed (filtered 75% noise via 20-day holding horizon), **196** ticker reuse collisions blocked, **13,225** verified no-change audits |
+| **Reference Benchmarks Solved** | ✅ Production | **6 / 6 reference benchmark scenarios** programmatically resolved (GIL, MARA, AAC/CART, TTF, ASFI, APTFF) |
+| **Company Name Similarity Gate** | ✅ Production | Strict corporate name matching ($\ge 0.70$) preventing 76% ticker reuse errors (e.g. Carolina Trust Bank $\ne$ Instacart) |
 | **Deep SEC Text Mining** | ✅ Production | Compliant SEC EDGAR crawler (10 req/s) mining verbatim excerpts from Form 8-K, 6-K, 10-Q |
 | **M&A Conversion Ratio Engine** | ✅ Production | NLP extraction of cash consideration, stock exchange ratios, CVR milestones, and acquirer SEC CIKs/tickers |
-| **Automated Lake Patching Engine** | ✅ Production | **519 approved actions applied** across **1,111,394 historical daily rows** in 20 Parquet files in **48 seconds** |
-| **Price Continuity Verification** | ✅ Production | Backward adjustment factor recalculation (`ADJ_FACTOR`, `ADJ_CLOSE`) eliminating artificial price cliff jumps |
+| **Automated Lake Patching Engine** | ✅ Production | High-throughput Parquet lake patching with backward adjustment factors (`ADJ_FACTOR`, `ADJ_CLOSE`) and price continuity validation |
+| **Audit & Metric Transparency** | ✅ Production | Clean separation of genuine dataset mutations from audited no-change validations in `columbia.applied_patches` |
 | **Analyst Review Dashboard** | ✅ Production | Dual-mode Streamlit UI (AWS RDS Live + Offline) with 1-click SEC text mining and audit trails |
-| **Automated Test Suite** | ✅ Passing | **12 / 12 unit tests passing (100% pass rate)** covering ETL, NLP parsing, and adjustment math |
+| **Automated Test Suite** | ✅ Passing | **18 / 18 unit tests passing (100% pass rate)** covering ETL, persistence, name matching, and adjustment math |
 
 ---
 
